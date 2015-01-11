@@ -503,7 +503,7 @@ static void pass_blame(git_blame *blame, git_blame__origin *origin, uint32_t opt
 		sg_origin = git__calloc(num_parents, sizeof(*sg_origin));
 
 	for (i=0; i<num_parents; i++) {
-		git_commit *p;
+		git_commit *p = NULL;
 		int j, same;
 
 		if (sg_origin[i])

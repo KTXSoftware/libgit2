@@ -2392,7 +2392,7 @@ int git_checkout_index(
 	const git_checkout_options *opts)
 {
 	int error, owned = 0;
-	git_iterator *index_i;
+	git_iterator *index_i = NULL;
 
 	if (!index && !repo) {
 		giterr_set(GITERR_CHECKOUT,

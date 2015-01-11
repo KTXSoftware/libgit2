@@ -721,7 +721,7 @@ static int add_push_report_pkt(git_push *push, git_pkt *pkt)
 
 static int add_push_report_sideband_pkt(git_push *push, git_pkt_data *data_pkt)
 {
-	git_pkt *pkt;
+	git_pkt *pkt = NULL;
 	const char *line = data_pkt->data, *line_end;
 	size_t line_len = data_pkt->len;
 	int error;

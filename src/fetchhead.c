@@ -73,7 +73,7 @@ static int fetchhead_ref_write(
 	git_fetchhead_ref *fetchhead_ref)
 {
 	char oid[GIT_OID_HEXSZ + 1];
-	const char *type, *name;
+	const char *type = NULL, *name = NULL;
 	int head = 0;
 
 	assert(file && fetchhead_ref);
