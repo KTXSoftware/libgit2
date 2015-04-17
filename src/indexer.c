@@ -22,6 +22,8 @@ extern git_mutex git__mwindow_mutex;
 
 #define UINT31_MAX (0x7FFFFFFF)
 
+#define entry entry2
+
 struct entry {
 	git_oid oid;
 	uint32_t crc;

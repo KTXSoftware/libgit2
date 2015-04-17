@@ -42,6 +42,8 @@
 
 #define NON_UNIQUE ULONG_MAX
 
+#define entry entry3
+
 /*
  * This is a hash mapping from line hash to line numbers in the first and
  * second file.
