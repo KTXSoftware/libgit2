@@ -1,4 +1,5 @@
 #include "clar_libgit2.h"
+#include "config/config_helpers.h"
 #include "buffer.h"
 #include "refspec.h"
 #include "remote.h"
@@ -272,7 +273,7 @@ void test_network_remote_remotes__nonmatch_upstream_refspec(void)
 	cl_git_pass(git_config_set_string(config, "branch.master.remote", "taggy"));
 	cl_git_pass(git_config_set_string(config, "branch.master.merge", "refs/heads/foo"));
 
-	cl_git_pass(git_remote_fetch(remote, &specs, NULL, NULL));
+	cl_git_pass(git_remote_fetch(remote, &specs, NULL));
 
 	git_remote_free(remote);
 }
@@ -385,26 +386,17 @@ void test_network_remote_remotes__cannot_add_a_remote_with_an_invalid_name(void)
 
 void test_network_remote_remotes__tagopt(void)
 {
-	const char *opt;
-	git_config *cfg;
-
-	cl_git_pass(git_repository_config(&cfg, _repo));
-
 	git_remote_set_autotag(_remote, GIT_REMOTE_DOWNLOAD_TAGS_ALL);
 	cl_git_pass(git_remote_save(_remote));
-	cl_git_pass(git_config_get_string(&opt, cfg, "remote.test.tagopt"));
-	cl_assert_equal_s("--tags", opt);
+	assert_config_entry_value(_repo, "remote.test.tagopt", "--tags");
 
 	git_remote_set_autotag(_remote, GIT_REMOTE_DOWNLOAD_TAGS_NONE);
 	cl_git_pass(git_remote_save(_remote));
-	cl_git_pass(git_config_get_string(&opt, cfg, "remote.test.tagopt"));
-	cl_assert_equal_s("--no-tags", opt);
+	assert_config_entry_value(_repo, "remote.test.tagopt", "--no-tags");
 
 	git_remote_set_autotag(_remote, GIT_REMOTE_DOWNLOAD_TAGS_AUTO);
 	cl_git_pass(git_remote_save(_remote));
-	cl_assert(git_config_get_string(&opt, cfg, "remote.test.tagopt") == GIT_ENOTFOUND);
-
-	git_config_free(cfg);
+	assert_config_entry_existence(_repo, "remote.test.tagopt", false);
 }
 
 void test_network_remote_remotes__can_load_with_an_empty_url(void)
@@ -521,63 +513,12 @@ void test_network_remote_remotes__query_refspecs(void)
 	git_remote_free(remote);
 }
 
-static int remote_single_branch(git_remote **out, git_repository *repo, const char *name, const char *url, void *payload)
-{
-	char *fetch_refspecs[] = {
-		"refs/heads/first-merge:refs/remotes/origin/first-merge",
-	};
-	git_strarray fetch_refspecs_strarray = {
-		fetch_refspecs,
-		1,
-	};
-
-	GIT_UNUSED(payload);
-
-	cl_git_pass(git_remote_create(out, repo, name, url));
-	cl_git_pass(git_remote_set_fetch_refspecs(*out, &fetch_refspecs_strarray));
-
-	return 0;
-}
-
 void test_network_remote_remotes__fetch_from_anonymous(void)
 {
 	git_remote *remote;
 
 	cl_git_pass(git_remote_create_anonymous(&remote, _repo, cl_fixture("testrepo.git"),
 						"refs/heads/*:refs/other/*"));
-	cl_git_pass(git_remote_fetch(remote, NULL, NULL, NULL));
+	cl_git_pass(git_remote_fetch(remote, NULL, NULL));
 	git_remote_free(remote);
-}
-
-void test_network_remote_remotes__single_branch(void)
-{
-	git_clone_options opts = GIT_CLONE_OPTIONS_INIT;
-	git_repository *repo;
-	git_strarray refs;
-	size_t i, count = 0;
-
-	opts.remote_cb = remote_single_branch;
-	opts.checkout_branch = "first-merge";
-
-	cl_git_pass(git_clone(&repo, "git://github.com/libgit2/TestGitRepository", "./single-branch", &opts));
-	cl_git_pass(git_reference_list(&refs, repo));
-
-	for (i = 0; i < refs.count; i++) {
-		if (!git__prefixcmp(refs.strings[i], "refs/heads/"))
-			count++;
-	}
-	cl_assert_equal_i(1, count);
-
-	git_strarray_free(&refs);
-	git_repository_free(repo);
-}
-
-void test_network_remote_remotes__restricted_refspecs(void)
-{
-	git_clone_options opts = GIT_CLONE_OPTIONS_INIT;
-	git_repository *repo;
-
-	opts.remote_cb = remote_single_branch;
-
-	cl_git_fail_with(GIT_EINVALIDSPEC, git_clone(&repo, "git://github.com/libgit2/TestGitRepository", "./restrict-refspec", &opts));
 }

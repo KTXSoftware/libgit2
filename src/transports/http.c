@@ -13,7 +13,7 @@
 #include "smart.h"
 #include "auth.h"
 #include "auth_negotiate.h"
-#include "openssl_stream.h"
+#include "tls_stream.h"
 #include "socket_stream.h"
 
 git_http_auth_scheme auth_schemes[] = {
@@ -350,6 +350,11 @@ static int on_headers_complete(http_parser *parser)
 				} else {
 					assert(t->cred);
 
+					if (!(t->cred->credtype & allowed_auth_types)) {
+						giterr_set(GITERR_NET, "credentials callback returned an invalid cred type");
+						return t->parse_error = PARSE_ERROR_GENERIC;
+					}
+
 					/* Successfully acquired a credential. */
 					t->parse_error = PARSE_ERROR_REPLAY;
 					return 0;
@@ -540,7 +545,7 @@ static int http_connect(http_subtransport *t)
 	}
 
 	if (t->connection_data.use_ssl) {
-		error = git_openssl_stream_new(&t->io, t->connection_data.host, t->connection_data.port);
+		error = git_tls_stream_new(&t->io, t->connection_data.host, t->connection_data.port);
 	} else {
 		error = git_socket_stream_new(&t->io,  t->connection_data.host, t->connection_data.port);
 	}
@@ -552,8 +557,9 @@ static int http_connect(http_subtransport *t)
 
 	error = git_stream_connect(t->io);
 
-#ifdef GIT_SSL
-	if ((!error || error == GIT_ECERTIFICATE) && t->owner->certificate_check_cb != NULL) {
+#if defined(GIT_OPENSSL) || defined(GIT_SECURE_TRANSPORT)
+	if ((!error || error == GIT_ECERTIFICATE) && t->owner->certificate_check_cb != NULL &&
+	    git_stream_is_encrypted(t->io)) {
 		git_cert *cert;
 		int is_valid;
 
@@ -1002,9 +1008,11 @@ static void http_free(git_smart_subtransport *subtransport)
 	git__free(t);
 }
 
-int git_smart_subtransport_http(git_smart_subtransport **out, git_transport *owner)
+int git_smart_subtransport_http(git_smart_subtransport **out, git_transport *owner, void *param)
 {
 	http_subtransport *t;
+
+	GIT_UNUSED(param);
 
 	if (!out)
 		return -1;
