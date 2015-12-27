@@ -11,7 +11,10 @@
 #include "git2/global.h"
 #include "git2/sys/openssl.h"
 #include "thread-utils.h"
-
+#if defined(GIT_MSVC_CRTDBG)
+#include "win32/w32_stack.h"
+#include "win32/w32_crtdbg_stacktrace.h"
+#endif
 
 git_mutex git__mwindow_mutex;
 
@@ -28,6 +31,7 @@ static git_mutex *openssl_locks;
 static git_global_shutdown_fn git__shutdown_callbacks[MAX_SHUTDOWN_CB];
 static git_atomic git__n_shutdown_callbacks;
 static git_atomic git__n_inits;
+char *git__user_agent;
 
 void git__on_shutdown(git_global_shutdown_fn callback)
 {
@@ -110,6 +114,20 @@ static void init_ssl(void)
 	SSL_CTX_set_mode(git__ssl_ctx, SSL_MODE_AUTO_RETRY);
 	SSL_CTX_set_verify(git__ssl_ctx, SSL_VERIFY_NONE, NULL);
 	if (!SSL_CTX_set_default_verify_paths(git__ssl_ctx)) {
+		SSL_CTX_free(git__ssl_ctx);
+		git__ssl_ctx = NULL;
+	}
+#endif
+}
+
+/**
+ * This function aims to clean-up the SSL context which
+ * we allocated.
+ */
+static void uninit_ssl(void)
+{
+#ifdef GIT_OPENSSL
+	if (git__ssl_ctx) {
 		SSL_CTX_free(git__ssl_ctx);
 		git__ssl_ctx = NULL;
 	}
@@ -211,6 +229,11 @@ int git_libgit2_init(void)
 
 	/* Only do work on a 0 -> 1 transition of the refcount */
 	if ((ret = git_atomic_inc(&git__n_inits)) == 1) {
+#if defined(GIT_MSVC_CRTDBG)
+		git_win32__crtdbg_stacktrace_init();
+		git_win32__stack_init();
+#endif
+
 		if (synchronized_threads_init() < 0)
 			ret = -1;
 	}
@@ -240,8 +263,16 @@ int git_libgit2_shutdown(void)
 	while (InterlockedCompareExchange(&_mutex, 1, 0)) { Sleep(0); }
 
 	/* Only do work on a 1 -> 0 transition of the refcount */
-	if ((ret = git_atomic_dec(&git__n_inits)) == 0)
+	if ((ret = git_atomic_dec(&git__n_inits)) == 0) {
 		synchronized_threads_shutdown();
+
+#if defined(GIT_MSVC_CRTDBG)
+		git_win32__crtdbg_stacktrace_cleanup();
+		git_win32__stack_cleanup();
+#endif
+
+		git__free(git__user_agent);
+	}
 
 	/* Exit the lock */
 	InterlockedExchange(&_mutex, 0);
@@ -251,18 +282,19 @@ int git_libgit2_shutdown(void)
 
 git_global_st *git__global_state(void)
 {
-	void *ptr;
+	git_global_st *ptr;
 
 	assert(git_atomic_get(&git__n_inits) > 0);
 
 	if ((ptr = TlsGetValue(_tls_index)) != NULL)
 		return ptr;
 
-	ptr = git__malloc(sizeof(git_global_st));
+	ptr = git__calloc(1, sizeof(git_global_st));
 	if (!ptr)
 		return NULL;
 
-	memset(ptr, 0x0, sizeof(git_global_st));
+	git_buf_init(&ptr->error_buf, 0);
+
 	TlsSetValue(_tls_index, ptr);
 	return ptr;
 }
@@ -316,8 +348,8 @@ int git_libgit2_init(void)
 {
 	int ret;
 
-	pthread_once(&_once_init, init_once);
 	ret = git_atomic_inc(&git__n_inits);
+	pthread_once(&_once_init, init_once);
 
 	return init_error ? init_error : ret;
 }
@@ -333,12 +365,14 @@ int git_libgit2_shutdown(void)
 
 	/* Shut down any subsystems that have global state */
 	git__shutdown();
+	uninit_ssl();
 
 	ptr = pthread_getspecific(_tls_key);
 	pthread_setspecific(_tls_key, NULL);
 
 	git__global_state_cleanup(ptr);
 	git__free(ptr);
+	git__free(git__user_agent);
 
 	pthread_key_delete(_tls_key);
 	git_mutex_free(&git__mwindow_mutex);
@@ -349,18 +383,18 @@ int git_libgit2_shutdown(void)
 
 git_global_st *git__global_state(void)
 {
-	void *ptr;
+	git_global_st *ptr;
 
 	assert(git_atomic_get(&git__n_inits) > 0);
 
 	if ((ptr = pthread_getspecific(_tls_key)) != NULL)
 		return ptr;
 
-	ptr = git__malloc(sizeof(git_global_st));
+	ptr = git__calloc(1, sizeof(git_global_st));
 	if (!ptr)
 		return NULL;
 
-	memset(ptr, 0x0, sizeof(git_global_st));
+	git_buf_init(&ptr->error_buf, 0);
 	pthread_setspecific(_tls_key, ptr);
 	return ptr;
 }
@@ -378,6 +412,7 @@ int git_libgit2_init(void)
 		ssl_inited = 1;
 	}
 
+	git_buf_init(&__state.error_buf, 0);
 	return git_atomic_inc(&git__n_inits);
 }
 
@@ -391,6 +426,8 @@ int git_libgit2_shutdown(void)
 
 	git__shutdown();
 	git__global_state_cleanup(&__state);
+	uninit_ssl();
+	git__free(git__user_agent);
 
 	return 0;
 }

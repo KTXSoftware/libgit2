@@ -63,6 +63,7 @@ int git_reset_default(
 
 		assert(delta->status == GIT_DELTA_ADDED ||
 			delta->status == GIT_DELTA_MODIFIED ||
+			delta->status == GIT_DELTA_CONFLICTED ||
 			delta->status == GIT_DELTA_DELETED);
 
 		error = git_index_conflict_remove(index, delta->old_file.path);
@@ -144,18 +145,18 @@ static int reset(
 	if ((error = git_buf_printf(&log_message, "reset: moving to %s", to)) < 0)
 		return error;
 
-	/* move HEAD to the new target */
-	if ((error = git_reference__update_terminal(repo, GIT_HEAD_FILE,
-		git_object_id(commit), NULL, git_buf_cstr(&log_message))) < 0)
-		goto cleanup;
-
 	if (reset_type == GIT_RESET_HARD) {
-		/* overwrite working directory with HEAD */
+		/* overwrite working directory with the new tree */
 		opts.checkout_strategy = GIT_CHECKOUT_FORCE;
 
 		if ((error = git_checkout_tree(repo, (git_object *)tree, &opts)) < 0)
 			goto cleanup;
 	}
+
+	/* move HEAD to the new target */
+	if ((error = git_reference__update_terminal(repo, GIT_HEAD_FILE,
+		git_object_id(commit), NULL, git_buf_cstr(&log_message))) < 0)
+		goto cleanup;
 
 	if (reset_type > GIT_RESET_SOFT) {
 		/* reset index to the target content */

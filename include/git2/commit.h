@@ -128,6 +128,19 @@ GIT_EXTERN(const char *) git_commit_message_raw(const git_commit *commit);
 GIT_EXTERN(const char *) git_commit_summary(git_commit *commit);
 
 /**
+ * Get the long "body" of the git commit message.
+ *
+ * The returned message is the body of the commit, comprising
+ * everything but the first paragraph of the message. Leading and
+ * trailing whitespaces are trimmed.
+ *
+ * @param commit a previously loaded commit.
+ * @return the body of a commit or NULL when no the message only
+ *   consists of a summary
+ */
+GIT_EXTERN(const char *) git_commit_body(git_commit *commit);
+
+/**
  * Get the commit time (i.e. committer time) of a commit.
  *
  * @param commit a previously loaded commit.
@@ -238,6 +251,17 @@ GIT_EXTERN(int) git_commit_nth_gen_ancestor(
 	git_commit **ancestor,
 	const git_commit *commit,
 	unsigned int n);
+
+/**
+ * Get an arbitrary header field
+ *
+ * @param out the buffer to fill
+ * @param commit the commit to look in
+ * @param field the header field to return
+ * @return 0 on succeess, GIT_ENOTFOUND if the field does not exist,
+ * or an error code
+ */
+GIT_EXTERN(int) git_commit_header_field(git_buf *out, const git_commit *commit, const char *field);
 
 /**
  * Create new commit in the repository from a list of `git_object` pointers

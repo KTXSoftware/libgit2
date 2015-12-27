@@ -31,6 +31,7 @@ void git_commit__free(void *_commit)
 	git__free(commit->raw_message);
 	git__free(commit->message_encoding);
 	git__free(commit->summary);
+	git__free(commit->body);
 
 	git__free(commit);
 }
@@ -309,6 +310,7 @@ int git_commit__parse(void *_commit, git_odb_object *odb_obj)
 	const char *buffer_end = buffer_start + git_odb_object_size(odb_obj);
 	git_oid parent_id;
 	size_t header_len;
+	git_signature dummy_sig;
 
 	buffer = buffer_start;
 
@@ -336,6 +338,15 @@ int git_commit__parse(void *_commit, git_odb_object *odb_obj)
 
 	if (git_signature__parse(commit->author, &buffer, buffer_end, "author ", '\n') < 0)
 		return -1;
+
+	/* Some tools create multiple author fields, ignore the extra ones */
+	while ((size_t)(buffer_end - buffer) >= strlen("author ") && !git__prefixcmp(buffer, "author ")) {
+		if (git_signature__parse(&dummy_sig, &buffer, buffer_end, "author ", '\n') < 0)
+			return -1;
+
+		git__free(dummy_sig.name);
+		git__free(dummy_sig.email);
+	}
 
 	/* Always parse the committer; we need the commit time */
 	commit->committer = git__malloc(sizeof(git_signature));
@@ -421,22 +432,37 @@ const char *git_commit_summary(git_commit *commit)
 {
 	git_buf summary = GIT_BUF_INIT;
 	const char *msg, *space;
+	bool space_contains_newline = false;
 
 	assert(commit);
 
 	if (!commit->summary) {
 		for (msg = git_commit_message(commit), space = NULL; *msg; ++msg) {
-			if (msg[0] == '\n' && (!msg[1] || msg[1] == '\n'))
+			char next_character = msg[0];
+			/* stop processing at the end of the first paragraph */
+			if (next_character == '\n' && (!msg[1] || msg[1] == '\n'))
 				break;
-			else if (msg[0] == '\n')
-				git_buf_putc(&summary, ' ');
-			else if (git__isspace(msg[0]))
-				space = space ? space : msg;
-			else if (space) {
-				git_buf_put(&summary, space, (msg - space) + 1);
-				space = NULL;
-			} else
-				git_buf_putc(&summary, *msg);
+			/* record the beginning of contiguous whitespace runs */
+			else if (git__isspace(next_character)) {
+				if(space == NULL) {
+					space = msg;
+					space_contains_newline = false;
+				}
+				space_contains_newline |= next_character == '\n';
+			}
+			/* the next character is non-space */
+			else {
+				/* process any recorded whitespace */
+				if (space) {
+					if(space_contains_newline)
+						git_buf_putc(&summary, ' '); /* if the space contains a newline, collapse to ' ' */
+					else
+						git_buf_put(&summary, space, (msg - space)); /* otherwise copy it */
+					space = NULL;
+				}
+				/* copy the next character */
+				git_buf_putc(&summary, next_character);
+			}
 		}
 
 		commit->summary = git_buf_detach(&summary);
@@ -445,6 +471,33 @@ const char *git_commit_summary(git_commit *commit)
 	}
 
 	return commit->summary;
+}
+
+const char *git_commit_body(git_commit *commit)
+{
+	const char *msg, *end;
+
+	assert(commit);
+
+	if (!commit->body) {
+		/* search for end of summary */
+		for (msg = git_commit_message(commit); *msg; ++msg)
+			if (msg[0] == '\n' && (!msg[1] || msg[1] == '\n'))
+				break;
+
+		/* trim leading and trailing whitespace */
+		for (; *msg; ++msg)
+			if (!git__isspace(*msg))
+				break;
+		for (end = msg + strlen(msg) - 1; msg <= end; --end)
+			if (!git__isspace(*end))
+				break;
+
+		if (*msg)
+			    commit->body = git__strndup(msg, end - msg + 1);
+	}
+
+	return commit->body;
 }
 
 int git_commit_tree(git_tree **tree_out, const git_commit *commit)
@@ -507,4 +560,59 @@ int git_commit_nth_gen_ancestor(
 
 	*ancestor = parent;
 	return 0;
+}
+
+int git_commit_header_field(git_buf *out, const git_commit *commit, const char *field)
+{
+	const char *buf = commit->raw_header;
+	const char *h, *eol;
+
+	git_buf_sanitize(out);
+	while ((h = strchr(buf, '\n')) && h[1] != '\0' && h[1] != '\n') {
+		h++;
+		if (git__prefixcmp(h, field)) {
+			buf = h;
+			continue;
+		}
+
+		h += strlen(field);
+		eol = strchr(h, '\n');
+		if (h[0] != ' ') {
+			buf = h;
+			continue;
+		}
+		if (!eol)
+			goto malformed;
+
+		h++; /* skip the SP */
+
+		git_buf_put(out, h, eol - h);
+		if (git_buf_oom(out))
+			goto oom;
+
+		/* If the next line starts with SP, it's multi-line, we must continue */
+		while (eol[1] == ' ') {
+			git_buf_putc(out, '\n');
+			h = eol + 2;
+			eol = strchr(h, '\n');
+			if (!eol)
+				goto malformed;
+
+			git_buf_put(out, h, eol - h);
+		}
+
+		if (git_buf_oom(out))
+			goto oom;
+
+		return 0;
+	}
+
+	return GIT_ENOTFOUND;
+
+malformed:
+	giterr_set(GITERR_OBJECT, "malformed header");
+	return -1;
+oom:
+	giterr_set_oom();
+	return -1;
 }

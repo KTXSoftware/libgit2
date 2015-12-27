@@ -12,13 +12,15 @@
 # > cmake --build . --target install
 
 PROJECT(libgit2 C)
-CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
+CMAKE_MINIMUM_REQUIRED(VERSION 2.8)
 CMAKE_POLICY(SET CMP0015 NEW)
 
 # Add find modules to the path
 SET(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/")
 
 INCLUDE(CheckLibraryExists)
+INCLUDE(CheckFunctionExists)
+INCLUDE(CheckStructHasMember)
 INCLUDE(AddCFlagIfSupported)
 INCLUDE(FindPkgConfig)
 
@@ -34,12 +36,11 @@ OPTION( PROFILE				"Generate profiling information"		OFF )
 OPTION( ENABLE_TRACE		"Enables tracing support"				OFF )
 OPTION( LIBGIT2_FILENAME	"Name of the produced binary"			OFF )
 
-OPTION( ANDROID				"Build for android NDK"	 				OFF )
-
 OPTION( USE_ICONV			"Link with and use iconv library" 		OFF )
 OPTION( USE_SSH				"Link with libssh to enable SSH support" ON )
 OPTION( USE_GSSAPI			"Link with libgssapi for SPNEGO auth"   OFF )
 OPTION( VALGRIND			"Configure build for valgrind"			OFF )
+OPTION( CURL			"User curl for HTTP if available" ON)
 
 IF(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
 	SET( USE_ICONV ON )
@@ -85,6 +86,23 @@ IF (NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
 	OPTION( USE_OPENSSL                     "Link with and use openssl library"             ON )
 ENDIF()
 
+CHECK_STRUCT_HAS_MEMBER ("struct stat" st_atim "sys/types.h;sys/stat.h"
+	HAVE_STRUCT_STAT_ST_ATIM LANGUAGE C)
+CHECK_STRUCT_HAS_MEMBER ("struct stat" st_atimespec "sys/types.h;sys/stat.h"
+	HAVE_STRUCT_STAT_ST_ATIMESPEC LANGUAGE C)
+
+IF (HAVE_STRUCT_STAT_ST_ATIM)
+	CHECK_STRUCT_HAS_MEMBER("struct stat" st_mtim.tv_nsec sys/stat.h
+		HAVE_STRUCT_STAT_NSEC LANGUAGE C)
+ELSEIF (HAVE_STRUCT_STAT_ST_ATIMESPEC)
+	CHECK_STRUCT_HAS_MEMBER("struct stat" st_mtimespec.tv_nsec sys/stat.h
+		HAVE_STRUCT_STAT_NSEC LANGUAGE C)
+ENDIF()
+
+IF (HAVE_STRUCT_STAT_NSEC OR WIN32)
+	OPTION( USE_NSEC		"Care about sub-second file mtimes and ctimes"	OFF )
+ENDIF()
+
 # This variable will contain the libraries we need to put into
 # libgit2.pc's Requires.private. That is, what we're linking to or
 # what someone who's statically linking us needs to link to.
@@ -100,17 +118,36 @@ SET(BIN_INSTALL_DIR bin CACHE PATH "Where to install binaries to.")
 SET(LIB_INSTALL_DIR lib CACHE PATH "Where to install libraries to.")
 SET(INCLUDE_INSTALL_DIR include CACHE PATH "Where to install headers to.")
 
+# Set a couple variables to be substituted inside the .pc file.
+# We can't just use LIB_INSTALL_DIR in the .pc file, as passing them as absolue
+# or relative paths is both valid and supported by cmake.
+SET (PKGCONFIG_PREFIX ${CMAKE_INSTALL_PREFIX})
+
+IF(IS_ABSOLUTE ${LIB_INSTALL_DIR})
+  SET (PKGCONFIG_LIBDIR ${LIB_INSTALL_DIR})
+ELSE(IS_ABSOLUTE ${LIB_INSTALL_DIR})
+  SET (PKGCONFIG_LIBDIR "\${prefix}/${LIB_INSTALL_DIR}")
+ENDIF (IS_ABSOLUTE ${LIB_INSTALL_DIR})
+
+IF(IS_ABSOLUTE ${INCLUDE_INSTALL_DIR})
+  SET (PKGCONFIG_INCLUDEDIR ${INCLUDE_INSTALL_DIR})
+ELSE(IS_ABSOLUTE ${INCLUDE_INSTALL_DIR})
+  SET (PKGCONFIG_INCLUDEDIR "\${prefix}/${INCLUDE_INSTALL_DIR}")
+ENDIF(IS_ABSOLUTE ${INCLUDE_INSTALL_DIR})
+
 FUNCTION(TARGET_OS_LIBRARIES target)
 	IF(WIN32)
 		TARGET_LINK_LIBRARIES(${target} ws2_32)
 	ELSEIF(CMAKE_SYSTEM_NAME MATCHES "(Solaris|SunOS)")
 		TARGET_LINK_LIBRARIES(${target} socket nsl)
-		SET(LIBGIT2_PC_LIBS "${LIBGIT2_PC_LIBS} -lsocket -lnsl" PARENT_SCOPE)
+		LIST(APPEND LIBGIT2_PC_LIBS "-lsocket" "-lnsl")
+		SET(LIBGIT2_PC_LIBS ${LIBGIT2_PC_LIBS} PARENT_SCOPE)
 	ENDIF()
 	CHECK_LIBRARY_EXISTS(rt clock_gettime "time.h" NEED_LIBRT)
 	IF(NEED_LIBRT)
 		TARGET_LINK_LIBRARIES(${target} rt)
-		SET(LIBGIT2_PC_LIBS "${LIBGIT2_PC_LIBS} -lrt" PARENT_SCOPE)
+		LIST(APPEND LIBGIT2_PC_LIBS "-lrt")
+		SET(LIBGIT2_PC_LIBS ${LIBGIT2_PC_LIBS} PARENT_SCOPE)
 	ENDIF()
 
 	IF(THREADSAFE)
@@ -118,13 +155,13 @@ FUNCTION(TARGET_OS_LIBRARIES target)
 	ENDIF()
 ENDFUNCTION()
 
-# For the MSVC IDE, this function splits up the source files like windows
-# explorer does. This is esp. useful with the libgit2_clar project, were
-# usually 2 or more files share the same name.  Sadly, this file grouping
-# is a per-directory option in cmake and not per-target, resulting in
-# empty virtual folders "tests" for the git2.dll
-FUNCTION(MSVC_SPLIT_SOURCES target)
-	IF(MSVC_IDE)
+# This function splits the sources files up into their appropriate
+# subdirectories.  This is especially useful for IDEs like Xcode and
+# Visual Studio, so that you can navigate into the libgit2_clar project,
+# and see the folders within the tests folder (instead of just seeing all
+# source and tests in a single folder.)
+FUNCTION(IDE_SPLIT_SOURCES target)
+	IF(MSVC_IDE OR CMAKE_GENERATOR STREQUAL Xcode)
 		GET_TARGET_PROPERTY(sources ${target} SOURCES)
 		FOREACH(source ${sources})
 			IF(source MATCHES ".*/")
@@ -155,11 +192,23 @@ STRING(REGEX REPLACE "^.*LIBGIT2_SOVERSION ([0-9]+)$" "\\1" LIBGIT2_SOVERSION "$
 INCLUDE_DIRECTORIES(src include)
 
 IF (SECURITY_FOUND)
-  MESSAGE("-- Found Security ${SECURITY_DIRS}")
+  # OS X 10.7 and older do not have some functions we use, fall back to OpenSSL there
+  CHECK_LIBRARY_EXISTS("${SECURITY_DIRS}" SSLCreateContext "Security/SecureTransport.h" HAVE_NEWER_SECURITY)
+  IF (HAVE_NEWER_SECURITY)
+    MESSAGE("-- Found Security ${SECURITY_DIRS}")
+    LIST(APPEND LIBGIT2_PC_LIBS "-framework Security")
+  ELSE()
+    MESSAGE("-- Security framework is too old, falling back to OpenSSL")
+    SET(SECURITY_FOUND "NO")
+    SET(SECURITY_DIRS "")
+    SET(SECURITY_DIR "")
+    SET(USE_OPENSSL "ON")
+  ENDIF()
 ENDIF()
 
 IF (COREFOUNDATION_FOUND)
   MESSAGE("-- Found CoreFoundation ${COREFOUNDATION_DIRS}")
+  LIST(APPEND LIBGIT2_PC_LIBS "-framework CoreFoundation")
 ENDIF()
 
 
@@ -186,7 +235,7 @@ IF (WIN32 AND WINHTTP)
 		SET(LIBWINHTTP_PATH "${CMAKE_CURRENT_BINARY_DIR}/deps/winhttp")
 		FILE(MAKE_DIRECTORY ${LIBWINHTTP_PATH})
 
-		IF ("${CMAKE_SIZEOF_VOID_P}" EQUAL "8")
+		IF (CMAKE_SIZEOF_VOID_P EQUAL 8)
 			set(WINHTTP_DEF "${CMAKE_CURRENT_SOURCE_DIR}/deps/winhttp/winhttp64.def")
 		ELSE()
 			set(WINHTTP_DEF "${CMAKE_CURRENT_SOURCE_DIR}/deps/winhttp/winhttp.def")
@@ -210,15 +259,26 @@ IF (WIN32 AND WINHTTP)
 
 	LINK_LIBRARIES(winhttp rpcrt4 crypt32)
 ELSE ()
+	IF (CURL)
+		PKG_CHECK_MODULES(CURL libcurl)
+	ENDIF ()
+
 	IF (NOT AMIGA AND USE_OPENSSL)
 		FIND_PACKAGE(OpenSSL)
 	ENDIF ()
+
+	IF (CURL_FOUND)
+		ADD_DEFINITIONS(-DGIT_CURL)
+		INCLUDE_DIRECTORIES(${CURL_INCLUDE_DIRS})
+		LINK_LIBRARIES(${CURL_LIBRARIES})
+		LIST(APPEND LIBGIT2_PC_LIBS ${CURL_LDFLAGS})
+	ENDIF()
 
 	FIND_PACKAGE(HTTP_Parser)
 	IF (HTTP_PARSER_FOUND AND HTTP_PARSER_VERSION_MAJOR EQUAL 2)
 		INCLUDE_DIRECTORIES(${HTTP_PARSER_INCLUDE_DIRS})
 		LINK_LIBRARIES(${HTTP_PARSER_LIBRARIES})
-		SET(LIBGIT2_PC_LIBS "${LIBGIT2_PC_LIBS} -lhttp_parser")
+		LIST(APPEND LIBGIT2_PC_LIBS "-lhttp_parser")
 	ELSE()
 		MESSAGE(STATUS "http-parser was not found or is too old; using bundled 3rd-party sources.")
 		INCLUDE_DIRECTORIES(deps/http-parser)
@@ -235,7 +295,7 @@ ELSEIF (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
 ELSEIF (OPENSSL_FOUND AND NOT SHA1_TYPE STREQUAL "builtin")
 	ADD_DEFINITIONS(-DOPENSSL_SHA1)
 	IF (CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
-		SET(LIBGIT2_PC_LIBS "${LIBGIT2_PC_LIBS} -lssl")
+		LIST(APPEND LIBGIT2_PC_LIBS "-lssl")
 	ELSE()
 		SET(LIBGIT2_PC_REQUIRES "${LIBGIT2_PC_REQUIRES} openssl")
 	ENDIF ()
@@ -249,7 +309,7 @@ IF (ENABLE_TRACE STREQUAL "ON")
 ENDIF()
 
 # Include POSIX regex when it is required
-IF(WIN32 OR AMIGA OR ANDROID OR CMAKE_SYSTEM_NAME MATCHES "(Solaris|SunOS)")
+IF(WIN32 OR AMIGA OR CMAKE_SYSTEM_NAME MATCHES "(Solaris|SunOS)")
 	INCLUDE_DIRECTORIES(deps/regex)
 	SET(SRC_REGEX deps/regex/regex.c)
 ENDIF()
@@ -260,7 +320,7 @@ IF (ZLIB_FOUND)
 	INCLUDE_DIRECTORIES(${ZLIB_INCLUDE_DIRS})
 	LINK_LIBRARIES(${ZLIB_LIBRARIES})
 	IF(APPLE OR CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
-		SET(LIBGIT2_PC_LIBS "${LIBGIT2_PC_LIBS} -lz")
+		LIST(APPEND LIBGIT2_PC_LIBS "-lz")
 	ELSE()
 		SET(LIBGIT2_PC_REQUIRES "${LIBGIT2_PC_REQUIRES} zlib")
 	ENDIF()
@@ -279,8 +339,14 @@ IF (LIBSSH2_FOUND)
 	ADD_DEFINITIONS(-DGIT_SSH)
 	INCLUDE_DIRECTORIES(${LIBSSH2_INCLUDE_DIRS})
 	LINK_DIRECTORIES(${LIBSSH2_LIBRARY_DIRS})
-	SET(LIBGIT2_PC_REQUIRES "${LIBGIT2_PC_REQUIRES} libssh2")
+	LIST(APPEND LIBGIT2_PC_LIBS ${LIBSSH2_LDFLAGS})
+	#SET(LIBGIT2_PC_LIBS "${LIBGIT2_PC_LIBS} ${LIBSSH2_LDFLAGS}")
 	SET(SSH_LIBRARIES ${LIBSSH2_LIBRARIES})
+
+	CHECK_LIBRARY_EXISTS("${LIBSSH2_LIBRARIES}" libssh2_userauth_publickey_frommemory "${LIBSSH2_LIBRARY_DIRS}" HAVE_LIBSSH2_MEMORY_CREDENTIALS)
+	IF (HAVE_LIBSSH2_MEMORY_CREDENTIALS)
+		ADD_DEFINITIONS(-DGIT_SSH_MEMORY_CREDENTIALS)
+	ENDIF()
 ELSE()
 	MESSAGE(STATUS "LIBSSH2 not found. Set CMAKE_PREFIX_PATH if it is installed outside of the default search path.")
 ENDIF()
@@ -300,7 +366,7 @@ ENDIF()
 IF (ICONV_FOUND)
 	ADD_DEFINITIONS(-DGIT_USE_ICONV)
 	INCLUDE_DIRECTORIES(${ICONV_INCLUDE_DIR})
-	SET(LIBGIT2_PC_LIBS "${LIBGIT2_PC_LIBS} ${ICONV_LIBRARIES}")
+	LIST(APPEND LIBGIT2_PC_LIBS ${ICONV_LIBRARIES})
 ENDIF()
 
 # Platform specific compilation flags
@@ -327,6 +393,7 @@ IF (MSVC)
 
 	IF (MSVC_CRTDBG)
 		SET(CRT_FLAG_DEBUG "${CRT_FLAG_DEBUG} /DGIT_MSVC_CRTDBG")
+		SET(CMAKE_C_STANDARD_LIBRARIES "${CMAKE_C_STANDARD_LIBRARIES}" "Dbghelp.lib")
 	ENDIF()
 
 	# /Zi - Create debugging information
@@ -403,6 +470,7 @@ ELSE ()
 		SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
 	ENDIF ()
 
+	ADD_C_FLAG_IF_SUPPORTED(-Wdocumentation)
 	ADD_C_FLAG_IF_SUPPORTED(-Wno-missing-field-initializers)
 	ADD_C_FLAG_IF_SUPPORTED(-Wstrict-aliasing=2)
 	ADD_C_FLAG_IF_SUPPORTED(-Wstrict-prototypes)
@@ -419,6 +487,21 @@ ELSE ()
 		SET(CMAKE_EXE_LINKER_FLAGS "-pg ${CMAKE_EXE_LINKER_FLAGS}")
 	ENDIF ()
 ENDIF()
+
+CHECK_FUNCTION_EXISTS(futimens HAVE_FUTIMENS)
+IF (HAVE_FUTIMENS)
+	ADD_DEFINITIONS(-DHAVE_FUTIMENS)
+ENDIF ()
+
+CHECK_FUNCTION_EXISTS(qsort_r HAVE_QSORT_R)
+IF (HAVE_QSORT_R)
+	ADD_DEFINITIONS(-DHAVE_QSORT_R)
+ENDIF ()
+
+CHECK_FUNCTION_EXISTS(qsort_s HAVE_QSORT_S)
+IF (HAVE_QSORT_S)
+	ADD_DEFINITIONS(-DHAVE_QSORT_S)
+ENDIF ()
 
 IF( NOT CMAKE_CONFIGURATION_TYPES )
 	# Build Debug by default
@@ -449,6 +532,14 @@ IF (THREADSAFE)
 	ENDIF()
 
 	ADD_DEFINITIONS(-DGIT_THREADS)
+ENDIF()
+
+IF (USE_NSEC)
+	ADD_DEFINITIONS(-DGIT_USE_NSEC)
+ENDIF()
+
+IF (HAVE_STRUCT_STAT_ST_ATIMESPEC)
+	ADD_DEFINITIONS(-DGIT_USE_STAT_ATIMESPEC)
 ENDIF()
 
 ADD_DEFINITIONS(-D_FILE_OFFSET_BITS=64)
@@ -495,7 +586,7 @@ IF(MSVC AND GIT_ARCH_64 AND NOT BUILD_SHARED_LIBS)
   SET_TARGET_PROPERTIES(git2 PROPERTIES STATIC_LIBRARY_FLAGS "/MACHINE:x64")
 ENDIF()
 
-MSVC_SPLIT_SOURCES(git2)
+IDE_SPLIT_SOURCES(git2)
 
 IF (SONAME)
 	SET_TARGET_PROPERTIES(git2 PROPERTIES VERSION ${LIBGIT2_VERSION_STRING})
@@ -505,6 +596,7 @@ IF (SONAME)
 		SET_TARGET_PROPERTIES(git2 PROPERTIES OUTPUT_NAME ${LIBGIT2_FILENAME})
 	ENDIF()
 ENDIF()
+STRING(REPLACE ";" " " LIBGIT2_PC_LIBS "${LIBGIT2_PC_LIBS}")
 CONFIGURE_FILE(${CMAKE_CURRENT_SOURCE_DIR}/libgit2.pc.in ${CMAKE_CURRENT_BINARY_DIR}/libgit2.pc @ONLY)
 
 IF (MSVC_IDE)
@@ -525,7 +617,12 @@ INSTALL(FILES include/git2.h DESTINATION ${INCLUDE_INSTALL_DIR} )
 
 # Tests
 IF (BUILD_CLAR)
-	FIND_PACKAGE(PythonInterp REQUIRED)
+	FIND_PACKAGE(PythonInterp)
+
+	IF(NOT PYTHONINTERP_FOUND)
+	  MESSAGE(FATAL_ERROR "Could not find a python interpeter, which is needed to build the tests. "
+	    "Make sure python is available, or pass -DBUILD_CLAR=OFF to skip building the tests")
+	ENDIF()
 
 	SET(CLAR_FIXTURES "${CMAKE_CURRENT_SOURCE_DIR}/tests/resources/")
 	SET(CLAR_PATH "${CMAKE_CURRENT_SOURCE_DIR}/tests")
@@ -558,7 +655,7 @@ IF (BUILD_CLAR)
 	TARGET_LINK_LIBRARIES(libgit2_clar ${GSSAPI_LIBRARIES})
 	TARGET_LINK_LIBRARIES(libgit2_clar ${ICONV_LIBRARIES})
 	TARGET_OS_LIBRARIES(libgit2_clar)
-	MSVC_SPLIT_SOURCES(libgit2_clar)
+	IDE_SPLIT_SOURCES(libgit2_clar)
 
 	IF (MSVC_IDE)
 		# Precompiled headers

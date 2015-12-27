@@ -80,6 +80,7 @@ static int does_negate_rule(int *out, git_vector *rules, git_attr_fnmatch *match
 	git_vector_foreach(rules, i, rule) {
 		if (!(rule->flags & GIT_ATTR_FNMATCH_HASWILD)) {
 			if (does_negate_pattern(rule, match)) {
+				error = 0;
 				*out = 1;
 				goto out;
 			}
@@ -88,18 +89,20 @@ static int does_negate_rule(int *out, git_vector *rules, git_attr_fnmatch *match
 		}
 
 	/*
-	 * If we're dealing with a directory (which we know via the
-	 * strchr() check) we want to use 'dirname/<star>' as the
-	 * pattern so p_fnmatch() honours FNM_PATHNAME
+	 * When dealing with a directory, we add '/<star>' so
+	 * p_fnmatch() honours FNM_PATHNAME. Checking for LEADINGDIR
+	 * alone isn't enough as that's also set for nagations, so we
+	 * need to check that NEGATIVE is off.
 	 */
 		git_buf_clear(&buf);
 		if (rule->containing_dir) {
 			git_buf_puts(&buf, rule->containing_dir);
 		}
-		if (!strchr(rule->pattern, '*'))
-			error = git_buf_printf(&buf, "%s/*", rule->pattern);
-		else
-			error = git_buf_puts(&buf, rule->pattern);
+
+		error = git_buf_puts(&buf, rule->pattern);
+
+		if ((rule->flags & (GIT_ATTR_FNMATCH_LEADINGDIR | GIT_ATTR_FNMATCH_NEGATIVE)) == GIT_ATTR_FNMATCH_LEADINGDIR)
+			error = git_buf_PUTS(&buf, "/*");
 
 		if (error < 0)
 			goto out;
@@ -388,7 +391,7 @@ static bool ignore_lookup_in_rules(
 }
 
 int git_ignore__lookup(
-	int *out, git_ignores *ignores, const char *pathname)
+	int *out, git_ignores *ignores, const char *pathname, git_dir_flag dir_flag)
 {
 	unsigned int i;
 	git_attr_file *file;
@@ -397,7 +400,7 @@ int git_ignore__lookup(
 	*out = GIT_IGNORE_NOTFOUND;
 
 	if (git_attr_path__init(
-		&path, pathname, git_repository_workdir(ignores->repo)) < 0)
+		&path, pathname, git_repository_workdir(ignores->repo), dir_flag) < 0)
 		return -1;
 
 	/* first process builtins - success means path was found */
@@ -470,7 +473,7 @@ int git_ignore_path_is_ignored(
 	memset(&path, 0, sizeof(path));
 	memset(&ignores, 0, sizeof(ignores));
 
-	if ((error = git_attr_path__init(&path, pathname, workdir)) < 0 ||
+	if ((error = git_attr_path__init(&path, pathname, workdir, GIT_DIR_FLAG_UNKNOWN)) < 0 ||
 		(error = git_ignore__for_path(repo, path.path, &ignores)) < 0)
 		goto cleanup;
 

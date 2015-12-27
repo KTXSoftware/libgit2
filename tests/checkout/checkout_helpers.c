@@ -2,6 +2,7 @@
 #include "checkout_helpers.h"
 #include "refs.h"
 #include "fileops.h"
+#include "index.h"
 
 void assert_on_branch(git_repository *repo, const char *branch)
 {
@@ -127,4 +128,24 @@ int checkout_count_callback(
 	}
 
 	return 0;
+}
+
+void tick_index(git_index *index)
+{
+	struct timespec ts;
+	struct timeval times[2];
+
+	cl_assert(index->on_disk);
+	cl_assert(git_index_path(index));
+
+	cl_git_pass(git_index_read(index, true));
+	ts = index->stamp.mtime;
+
+	times[0].tv_sec = ts.tv_sec;
+	times[0].tv_usec = ts.tv_nsec / 1000;
+	times[1].tv_sec = ts.tv_sec + 5;
+	times[1].tv_usec = ts.tv_nsec / 1000;
+
+	cl_git_pass(p_utimes(git_index_path(index), times));
+	cl_git_pass(git_index_read(index, true));
 }

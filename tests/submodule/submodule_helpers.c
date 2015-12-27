@@ -126,12 +126,43 @@ git_repository *setup_fixture_submod2(void)
 	return repo;
 }
 
+git_repository *setup_fixture_super(void)
+{
+	git_repository *repo = cl_git_sandbox_init("super");
+
+	cl_fixture_sandbox("sub.git");
+	p_mkdir("super/sub", 0777);
+
+	rewrite_gitmodules(git_repository_workdir(repo));
+
+	cl_set_cleanup(cleanup_fixture_submodules, "sub.git");
+
+	cl_git_pass(git_repository_reinit_filesystem(repo, 1));
+
+	return repo;
+}
+
 git_repository *setup_fixture_submodule_simple(void)
 {
 	git_repository *repo = cl_git_sandbox_init("submodule_simple");
 
 	cl_fixture_sandbox("testrepo.git");
 	p_mkdir("submodule_simple/testrepo", 0777);
+
+	cl_set_cleanup(cleanup_fixture_submodules, "testrepo.git");
+
+	cl_git_pass(git_repository_reinit_filesystem(repo, 1));
+
+	return repo;
+}
+
+git_repository *setup_fixture_submodule_with_path(void)
+{
+	git_repository *repo = cl_git_sandbox_init("submodule_with_path");
+
+	cl_fixture_sandbox("testrepo.git");
+	p_mkdir("submodule_with_path/lib", 0777);
+	p_mkdir("submodule_with_path/lib/testrepo", 0777);
 
 	cl_set_cleanup(cleanup_fixture_submodules, "testrepo.git");
 
@@ -156,21 +187,18 @@ void refute__submodule_exists(
 	git_repository *repo, const char *name, int expected_error,
 	const char *msg, const char *file, int line)
 {
-	git_submodule *sm;
 	clar__assert_equal(
 		file, line, msg, 1, "%i",
-		expected_error, (int)(git_submodule_lookup(&sm, repo, name)));
+		expected_error, (int)(git_submodule_lookup(NULL, repo, name)));
 }
 
 unsigned int get_submodule_status(git_repository *repo, const char *name)
 {
-	git_submodule *sm = NULL;
 	unsigned int status = 0;
 
-	cl_git_pass(git_submodule_lookup(&sm, repo, name));
-	cl_assert(sm);
-	cl_git_pass(git_submodule_status(&status, sm));
-	git_submodule_free(sm);
+	assert(repo && name);
+
+	cl_git_pass(git_submodule_status(&status, repo, name, GIT_SUBMODULE_IGNORE_UNSPECIFIED));
 
 	return status;
 }
